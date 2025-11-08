@@ -1,8 +1,10 @@
 package org.example;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import okhttp3.HttpUrl;
 import org.example.weather.exceptions.ApiRequestException;
 import org.example.weather.exceptions.CityNotFoundException;
+import org.example.weather.exceptions.ConfigurationException;
 import org.example.weather.exceptions.DataParseException;
 import org.example.weather.exceptions.WeatherSDKException;
 import org.slf4j.Logger;
@@ -12,6 +14,7 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.Objects;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -23,19 +26,27 @@ public class WeatherSDK {
     private final String baseUrl;
     private final Mode mode;
     private final WeatherCache cache;
-    private final ObjectMapper mapper = new ObjectMapper();
     private final long ttlMillis;
     private final long pollingIntervalMillis;
     private ScheduledExecutorService scheduler;
 
+    private static final ObjectMapper mapper = new ObjectMapper();
+    private static final WeatherApiClient apiClient = new WeatherApiClient(mapper);
 
-    private WeatherSDK(String apiKey,
-                       String baseUrl,
-                       Mode mode,
-                       int cacheSize,
-                       long ttlMillis,
-                       long pollingIntervalMillis) {
+    public WeatherSDK(String apiKey,
+                      String baseUrl,
+                      Mode mode,
+                      int cacheSize,
+                      long ttlMillis,
+                      long pollingIntervalMillis) {
 
+        if (apiKey == null || apiKey.isBlank()) {
+            throw new ConfigurationException("API key cannot be null or empty");
+        }
+
+        if (baseUrl == null || baseUrl.isBlank()) {
+            throw new ConfigurationException("Base URL cannot be null or empty");
+        }
         this.apiKey = apiKey;
         this.baseUrl = baseUrl;
         this.mode = mode;
@@ -43,51 +54,8 @@ public class WeatherSDK {
         this.ttlMillis = ttlMillis;
         this.pollingIntervalMillis = pollingIntervalMillis;
 
-        if (mode == Mode.POLLING) {
-            log.debug("Start polling with interval {}", pollingIntervalMillis);
-            startPolling();
-        }
     }
 
-    static WeatherSDK create(String apiKey,
-                             String baseUrl,
-                             Mode mode,
-                             int cacheSize,
-                             long ttlMillis,
-                             long pollingIntervalMillis) {
-        log.debug("initialization weather sdk");
-        return new WeatherSDK(apiKey, baseUrl, mode, cacheSize, ttlMillis, pollingIntervalMillis);
-    }
-
-    private void startPolling() {
-
-        scheduler = Executors.newSingleThreadScheduledExecutor();
-
-        Runnable pollingTask = () -> {
-            for (String city : cache.getAll().keySet()) {
-                try {
-                    WeatherResponse response = fetchWeather(city);
-                    cache.put(city, new WeatherData(System.currentTimeMillis(), response));
-                } catch (Exception e) {
-                    System.err.println("[Polling error] " + e.getMessage());
-                }
-            }
-        };
-
-        scheduler.scheduleAtFixedRate(
-                pollingTask,
-                0,
-                pollingIntervalMillis,
-                TimeUnit.MILLISECONDS
-        );
-    }
-
-    public void shutdown() {
-        if (scheduler != null && !scheduler.isShutdown()) {
-            scheduler.shutdownNow();
-            log.debug("Polling scheduler stopped for API key: {}", apiKey);
-        }
-    }
 
     public WeatherResponse getWeather(String city) throws WeatherSDKException {
         log.debug("Requesting weather for city: {}", city);
@@ -99,14 +67,18 @@ public class WeatherSDK {
                     log.debug("Returning cached response for city: {}", city);
                     return cached.getResponse();
                 }
-                WeatherResponse fresh = fetchWeather(city);
-                cache.put(city, new WeatherData(System.currentTimeMillis(), fresh));
-                return fresh;
+                WeatherResponse freshWeatherResponse = fetchWeather(city);
+                cache.put(city, new WeatherData(System.currentTimeMillis(), freshWeatherResponse));
+                return freshWeatherResponse;
             } else {
                 if (cached != null) {
+                    log.debug("Returning pooling cache response for city: {}", city);
                     return cached.getResponse();
                 }
                 WeatherResponse fresh = fetchWeather(city);
+                if (cache.getSize() == 0) {
+                    startPolling();
+                }
                 cache.put(city, new WeatherData(System.currentTimeMillis(), fresh));
                 return fresh;
             }
@@ -116,34 +88,58 @@ public class WeatherSDK {
         }
     }
 
+    public void shutdown() {
+        if (scheduler != null && !scheduler.isShutdown()) {
+            scheduler.shutdownNow();
+            log.debug("Polling scheduler stopped for API key: {}", apiKey);
+        }
+    }
+
     private WeatherResponse fetchWeather(String city) throws WeatherSDKException {
         log.debug("Fetching weather for city: {}", city);
         Coordinates coords = getCoordinates(city);
-        String urlStr = String.format("%s?lat=%f&lon=%f&appid=%s&units=metric",
-                baseUrl, coords.getLat(), coords.getLon(), apiKey);
+        HttpUrl url = Objects.requireNonNull(HttpUrl.parse(baseUrl))
+                .newBuilder()
+                .addQueryParameter("lat", String.valueOf(coords.getLat()))
+                .addQueryParameter("lon", String.valueOf(coords.getLon()))
+                .addQueryParameter("appid", apiKey)
+                .addQueryParameter("units", "metric")
+                .build();
 
         try {
-            URL url = new URL(urlStr);
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-            conn.setRequestMethod("GET");
-
-            int status = conn.getResponseCode();
-            if (status != 200) {
-                throw new ApiRequestException("Failed to fetch weather data. HTTP code: " + status);
-            }
-
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream()))) {
-                return mapper.readValue(reader, WeatherResponse.class);
-            } catch (Exception e) {
-                throw new DataParseException("Failed to parse weather response for city: " + city, e);
-            } finally {
-                conn.disconnect();
-            }
-        } catch (ApiRequestException e) {
+            String json = apiClient.fetch(url.toString());
+            WeatherResponse response = apiClient.parse(json, WeatherResponse.class);
+            log.debug("Fetched weather for {} successfully", city);
+            return response;
+        } catch (ApiRequestException | DataParseException e) {
             throw e;
         } catch (Exception e) {
-            throw new ApiRequestException("Unexpected error during weather request for city: " + city, e);
+            throw new ApiRequestException("Unexpected error fetching weather for " + city, e);
         }
+    }
+
+    private void startPolling() {
+        log.debug("Start polling with interval {}", pollingIntervalMillis);
+        scheduler = Executors.newSingleThreadScheduledExecutor();
+
+        Runnable pollingTask = () -> {
+            log.debug("refreshing cache");
+            for (String city : cache.getAll().keySet()) {
+                try {
+                    WeatherResponse response = fetchWeather(city);
+                    cache.put(city, new WeatherData(System.currentTimeMillis(), response));
+                } catch (WeatherSDKException e) {
+                    log.error("Polling failed for {}: {}", city, e.getMessage());
+                }
+            }
+        };
+
+        scheduler.scheduleAtFixedRate(
+                pollingTask,
+                0,
+                pollingIntervalMillis,
+                TimeUnit.MILLISECONDS
+        );
     }
 
     private Coordinates getCoordinates(String city) throws WeatherSDKException {
@@ -184,13 +180,5 @@ public class WeatherSDK {
         } catch (Exception e) {
             throw new ApiRequestException("Unexpected error while fetching coordinates for city: " + city, e);
         }
-    }
-
-    public String getApiKey() {
-        return apiKey;
-    }
-
-    public Mode getMode() {
-        return mode;
     }
 }

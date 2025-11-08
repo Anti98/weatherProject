@@ -1,7 +1,7 @@
 package org.example.weather.exceptions;
 
 
-public class WeatherSDKException extends Exception {
+public class WeatherSDKException extends RuntimeException {
     public WeatherSDKException(String message) {
         super(message);
     }

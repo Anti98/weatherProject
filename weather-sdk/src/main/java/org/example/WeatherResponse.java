@@ -36,4 +36,19 @@ public class WeatherResponse {
         public long sunrise;
         public long sunset;
     }
+    public String getWeatherInfo() {
+        String cityName = name != null ? name : "Unknown city";
+        String weatherDescription = "No weather data";
+        String temperatureInfo = "No temperature data";
+
+        if (weather != null && weather.length > 0 && weather[0] != null) {
+            weatherDescription = weather[0].main + " (" + weather[0].description + ")";
+        }
+
+        if (main != null) {
+            temperatureInfo = String.format("%.1f°C, feels like %.1f°C", main.temp, main.feels_like);
+        }
+
+        return String.format("City: %s, Weather: %s, Temperature: %s", cityName, weatherDescription, temperatureInfo);
+    }
 }

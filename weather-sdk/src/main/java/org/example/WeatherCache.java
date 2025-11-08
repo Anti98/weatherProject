@@ -28,4 +28,8 @@ public class WeatherCache {
     public synchronized Map<String, WeatherData> getAll() {
         return new LinkedHashMap<>(cache);
     }
+
+    public synchronized int getSize() {
+        return cache.size();
+    }
 }

@@ -17,7 +17,7 @@ public class SDKRegistry {
             throw new IllegalStateException("SDK with this key already exists!");
         }
 
-        WeatherSDK sdk =  WeatherSDK.create(apiKey, baseUrl, mode, cacheSize, ttlMillis, pollingIntervalMillis);
+        WeatherSDK sdk = new WeatherSDK(apiKey, baseUrl, mode, cacheSize, ttlMillis, pollingIntervalMillis);
         registry.put(apiKey, sdk);
         return sdk;
     }
@@ -34,6 +34,7 @@ public class SDKRegistry {
     public static int size() {
         return registry.size();
     }
+
     public static Coordinates getCoordinates(String city) {
         return cityCoordinates.get(city.toLowerCase());
     }
